@@ -1,638 +1,1052 @@
-// ============================================
-// 👇👇👇 在这里修改你的默认信息 👇👇👇
-// ============================================
-const DEFAULT_DATA = [
-  { id: "1", type: "text", label: "邮箱", value: "km6mb1vwfedfzembh11@icloud.com", pinned: true },
-  { id: "2", type: "text", label: "密码", value: "Bb260327", pinned: true },
-  { id: "3", type: "text", label: "钉钉 Webhook", value: "https://oapi.dingtalk.com/robot/send?access_token=fd74418fff807c20b7028adb27b7b704bb58e68202209b21b2e7df3c5cd64e0f", pinned: false },
-  { id: "4", type: "text", label: "Secret", value: "SEC44ea9051e751b16db4544949161e685bbcc7f94fcddad6b99908f54b594f013e", pinned: false },
-];
+/*  ============================================================
+ *  InfoBox — Cloudflare Worker（增强版）
+ *  原有功能：KV 存储、text/link/image/video 卡片、置顶（pinned）、图床上传
+ *  新增功能：
+ *    ★ 分组管理（Group）— 卡片可归入自定义分组，支持折叠/展开
+ *    ★ 搜索过滤 — 实时搜索 label / value
+ *    ★ 深色模式 — 一键切换暗色主题
+ *    ★ 导入 / 导出 — JSON 备份 & 恢复
+ *    ★ 批量操作 — 多选删除
+ *    ★ 卡片颜色标签 — 可视化分类
+ *    ★ 复制到剪贴板 — 一键复制 value
+ *    ★ 拖拽排序 — 手动调整顺序
+ *  ============================================================
+ *  部署说明：
+ *    1. Cloudflare Dashboard → Workers & Pages → 创建 Worker
+ *    2. 粘贴本代码 → 部署
+ *    3. 绑定 KV：Settings → Bindings → Add → KV Namespace
+ *       变量名填 INFO_KV
+ *    4. 修改下方 IMG_HOST 为你的图床地址
+ *  ============================================================ */
 
-// 图床地址
-const IMG_HOST = "https://tu1.xiao78.dpdns.org";
-// ============================================
-// 👆👆👆 在这里修改你的默认信息 👆👆👆
-// ============================================
+// ─── 配置 ───────────────────────────────────────
+const IMG_HOST = '';           // 图床地址，例如 https://img.example.com
+const PASSWORD = '';           // 管理密码，留空则不验证
+const KV_KEY  = 'info_data';  // KV 存储的 key
+// ─────────────────────────────────────────────────
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/items" && request.method === "GET")
-      return await handleGet(env);
-    if (url.pathname === "/api/items" && request.method === "POST")
-      return await handleSave(request, env);
-    if (url.pathname === "/api/items" && request.method === "DELETE")
-      return await handleDelete(request, env);
-
-    // 代理上传到图床
-    if (url.pathname === "/api/upload" && request.method === "POST") {
-      return await handleUpload(request);
+    // ── API 路由 ──────────────────────────────
+    if (url.pathname === '/api/data' && request.method === 'GET') {
+      return handleGetData(env);
+    }
+    if (url.pathname === '/api/data' && request.method === 'POST') {
+      return handleSaveData(request, env);
+    }
+    if (url.pathname === '/api/upload' && request.method === 'POST') {
+      return handleUpload(request);
     }
 
-    return new Response(HTML(), {
-      headers: { "Content-Type": "text/html;charset=UTF-8" },
+    // ── 页面 ──────────────────────────────────
+    return new Response(HTML, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
-  },
+  }
 };
 
-async function handleGet(env) {
-  let items = DEFAULT_DATA;
-  if (env.INFO_KV) {
-    try {
-      const s = await env.INFO_KV.get("items", "json");
-      if (s) items = s;
-    } catch {}
+// ── 获取数据 ──────────────────────────────────
+async function handleGetData(env) {
+  try {
+    if (!env.INFO_KV) return json({ items: [], groups: [] });
+    const raw = await env.INFO_KV.get(KV_KEY);
+    if (!raw) return json({ items: [], groups: [] });
+    const data = JSON.parse(raw);
+    // 兼容旧数据格式（纯数组）
+    if (Array.isArray(data)) return json({ items: data, groups: [] });
+    return json(data);
+  } catch {
+    return json({ items: [], groups: [] });
   }
-  return Response.json({ ok: true, items, hasKV: !!env.INFO_KV });
 }
 
-async function handleSave(request, env) {
-  const body = await request.json();
-  if (!env.INFO_KV)
-    return Response.json({ ok: false, msg: "KV 未绑定" });
-  let items = [];
+// ── 保存数据 ──────────────────────────────────
+async function handleSaveData(request, env) {
   try {
-    const s = await env.INFO_KV.get("items", "json");
-    if (s) items = s;
-  } catch {}
-  if (body.item) {
-    const idx = items.findIndex((i) => i.id === body.item.id);
-    if (idx >= 0) items[idx] = body.item;
-    else items.push(body.item);
-  } else if (body.items) {
-    items = body.items;
-  }
-  await env.INFO_KV.put("items", JSON.stringify(items));
-  return Response.json({ ok: true, items });
-}
-
-async function handleDelete(request, env) {
-  const body = await request.json();
-  if (!env.INFO_KV)
-    return Response.json({ ok: false, msg: "KV 未绑定" });
-  let items = [];
-  try {
-    const s = await env.INFO_KV.get("items", "json");
-    if (s) items = s;
-  } catch {}
-  items = items.filter((i) => i.id !== body.id);
-  await env.INFO_KV.put("items", JSON.stringify(items));
-  return Response.json({ ok: true, items });
-}
-
-async function handleUpload(request) {
-  try {
-    const formData = await request.formData();
-    const resp = await fetch(IMG_HOST + "/upload", {
-      method: "POST",
-      body: formData,
-    });
-    const result = await resp.json();
-    return Response.json({ ok: true, result });
+    if (!env.INFO_KV) return json({ ok: false, msg: '未绑定 KV' }, 500);
+    const body = await request.json();
+    // 密码验证
+    if (PASSWORD && body._password !== PASSWORD) {
+      return json({ ok: false, msg: '密码错误' }, 403);
+    }
+    const save = { items: body.items || [], groups: body.groups || [] };
+    await env.INFO_KV.put(KV_KEY, JSON.stringify(save));
+    return json({ ok: true });
   } catch (e) {
-    return Response.json({ ok: false, msg: e.message });
+    return json({ ok: false, msg: e.message }, 500);
   }
 }
 
-function HTML() {
-  return `<!DOCTYPE html>
+// ── 图片上传（代理到图床）──────────────────────
+async function handleUpload(request) {
+  if (!IMG_HOST) return json({ ok: false, msg: '未配置图床地址' }, 400);
+  try {
+    const form = await request.formData();
+    const resp = await fetch(IMG_HOST + '/upload', {
+      method: 'POST',
+      body: form
+    });
+    const data = await resp.json();
+    return json(data);
+  } catch (e) {
+    return json({ ok: false, msg: e.message }, 500);
+  }
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    }
+  });
+}
+
+// ── HTML ──────────────────────────────────────
+const HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>InfoBox</title>
 <style>
-*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --bg:#f0f0f3;--card:#fff;--border:rgba(0,0,0,.06);--text:#111;--sub:#8e8e93;
-  --accent:#0a84ff;--green:#30d158;--red:#ff453a;--orange:#ff9f0a;
-  --r:16px;--shadow:0 1px 4px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.04);
+/* ── CSS 变量（亮色） ───────────────── */
+:root {
+  --bg: #f0f2f5;
+  --card-bg: #ffffff;
+  --text: #1f2937;
+  --text2: #6b7280;
+  --border: #e5e7eb;
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --danger: #ef4444;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --shadow: 0 1px 3px rgba(0,0,0,.1);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.1);
+  --radius: 12px;
+  --radius-sm: 8px;
 }
-body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;
-  background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;
-  padding-bottom:env(safe-area-inset-bottom,20px)}
+/* ── 深色模式 ───────────────────────── */
+.dark {
+  --bg: #111827;
+  --card-bg: #1f2937;
+  --text: #f3f4f6;
+  --text2: #9ca3af;
+  --border: #374151;
+  --shadow: 0 1px 3px rgba(0,0,0,.3);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,.4);
+}
 
-.wrap{max-width:520px;margin:0 auto;padding:16px 16px 100px}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  transition: background .3s, color .3s;
+}
 
-/* header */
-.hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 0 16px}
-.hdr h1{font-size:26px;font-weight:800;letter-spacing:-.8px}
-.badge{font-size:10px;padding:3px 10px;border-radius:20px;font-weight:700;letter-spacing:.3px}
-.badge-on{background:#e8f8ee;color:#1a8d42}
-.badge-off{background:#fef4e6;color:#c47600}
+/* ── 顶栏 ──────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 12px 20px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.topbar h1 { font-size: 20px; font-weight: 700; margin-right: auto; }
+.topbar h1 span { color: var(--primary); }
 
-/* 工具栏 */
-.bar{display:flex;gap:8px;margin-bottom:16px}
-.bar button{flex:1;padding:11px 0;border:none;border-radius:12px;font-size:13px;font-weight:700;
-  cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;gap:5px}
-.bar button:active{transform:scale(.97)}
-.b-add{background:var(--accent);color:#fff}
-.b-img{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
-.b-tog{background:var(--card);color:var(--sub);border:1px solid var(--border) !important}
-.b-kv{background:var(--card);color:var(--sub);border:1px solid var(--border) !important}
+/* ── 搜索框 ────────────────────────── */
+.search-box {
+  display: flex; align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 14px;
+  gap: 6px;
+  min-width: 200px;
+}
+.search-box input {
+  border: none; outline: none; background: transparent;
+  color: var(--text); font-size: 14px; width: 100%;
+}
 
-/* 分组标题 */
-.section-title{font-size:12px;font-weight:700;color:var(--sub);text-transform:uppercase;
-  letter-spacing:1px;padding:12px 4px 6px;display:flex;align-items:center;gap:6px}
+/* ── 按钮 ──────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 14px;
+  border: none; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all .2s;
+  white-space: nowrap;
+}
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { opacity: .85; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-outline:hover { background: var(--bg); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon {
+  background: transparent; border: none;
+  color: var(--text2); cursor: pointer;
+  padding: 4px; border-radius: 6px;
+  display: inline-flex; align-items: center;
+  transition: all .2s;
+}
+.btn-icon:hover { color: var(--primary); background: var(--bg); }
 
-/* 卡片 */
-.card{background:var(--card);border-radius:var(--r);box-shadow:var(--shadow);
-  margin-bottom:8px;overflow:hidden;transition:all .2s;border:1px solid var(--border)}
-.card-h{display:flex;align-items:center;padding:13px 14px;cursor:pointer;user-select:none;gap:10px}
-.card-ico{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
-  font-size:16px;flex-shrink:0}
-.ico-text{background:#eef2ff;color:#6366f1}
-.ico-image{background:#fef9c3;color:#ca8a04}
-.ico-video{background:#fce4ec;color:#e91e63}
-.ico-link{background:#e0f2fe;color:#0284c7}
-.card-info{flex:1;min-width:0}
-.card-info h3{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-info p{font-size:11px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.pin-dot{width:6px;height:6px;border-radius:50%;background:var(--orange);flex-shrink:0}
-.chev{color:#c7c7cc;font-size:10px;transition:transform .2s;flex-shrink:0}
-.card.open .chev{transform:rotate(90deg)}
+/* ── 主体 ──────────────────────────── */
+.container { max-width: 900px; margin: 0 auto; padding: 20px; }
 
-.card-b{max-height:0;overflow:hidden;transition:max-height .35s ease}
-.card.open .card-b{max-height:1200px}
-.card-inner{padding:0 14px 14px}
+/* ── 分组标签栏 ────────────────────── */
+.group-tabs {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 16px; align-items: center;
+}
+.group-tab {
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all .2s;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  user-select: none;
+}
+.group-tab:hover { border-color: var(--primary); color: var(--primary); }
+.group-tab.active {
+  background: var(--primary); color: #fff;
+  border-color: var(--primary);
+}
+.group-tab .count {
+  display: inline-block;
+  background: rgba(255,255,255,.2);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.group-tab.active .count { background: rgba(255,255,255,.3); }
 
-/* 媒体 */
-.media{border-radius:12px;overflow:hidden;margin-bottom:10px;background:#f5f5f7;position:relative}
-.media img,.media video{width:100%;display:block;max-height:360px;object-fit:contain}
-.media-err{padding:30px;text-align:center;color:var(--sub);font-size:13px}
+/* ── 卡片 ──────────────────────────── */
+.card-list { display: flex; flex-direction: column; gap: 10px; }
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex; align-items: center; gap: 12px;
+  box-shadow: var(--shadow);
+  transition: all .2s;
+  position: relative;
+}
+.card:hover { box-shadow: var(--shadow-lg); }
+.card.pinned { border-left: 3px solid var(--warning); }
+.card.dragging { opacity: .5; }
+.card .color-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%; flex-shrink: 0;
+}
+.card .card-body { flex: 1; min-width: 0; }
+.card .card-label {
+  font-size: 12px; color: var(--text2);
+  margin-bottom: 2px; display: flex; align-items: center; gap: 6px;
+}
+.card .card-label .badge {
+  font-size: 10px; padding: 1px 6px;
+  border-radius: 10px; background: var(--primary);
+  color: #fff; font-weight: 500;
+}
+.card .card-value {
+  font-size: 14px; word-break: break-all;
+}
+.card .card-value a {
+  color: var(--primary); text-decoration: none;
+}
+.card .card-value a:hover { text-decoration: underline; }
+.card .card-value img {
+  max-width: 200px; max-height: 120px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.card .card-value video {
+  max-width: 300px; border-radius: var(--radius-sm);
+}
+.card .card-actions {
+  display: flex; gap: 4px; flex-shrink: 0; opacity: 0;
+  transition: opacity .2s;
+}
+.card:hover .card-actions { opacity: 1; }
+.card .drag-handle {
+  cursor: grab; color: var(--text2); padding: 4px;
+  opacity: 0; transition: opacity .2s;
+}
+.card:hover .drag-handle { opacity: .5; }
+.card .drag-handle:hover { opacity: 1; }
+.card input[type=checkbox] {
+  width: 16px; height: 16px; cursor: pointer;
+  accent-color: var(--primary);
+}
 
-/* 值 */
-.val{background:#f9fafb;border:1px solid rgba(0,0,0,.05);border-radius:10px;padding:10px 12px;
-  font-size:13px;word-break:break-all;color:#374151;line-height:1.65;font-family:"SF Mono",Monaco,Consolas,monospace}
-.val.is-link{color:var(--accent);cursor:pointer}
+/* ── 模态框 ─────────────────────────── */
+.modal-mask {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  width: 100%; max-width: 480px;
+  padding: 24px;
+  max-height: 90vh; overflow-y: auto;
+}
+.modal h2 { font-size: 18px; margin-bottom: 16px; }
+.modal .form-group { margin-bottom: 14px; }
+.modal label {
+  display: block; font-size: 13px;
+  color: var(--text2); margin-bottom: 4px; font-weight: 500;
+}
+.modal input, .modal select, .modal textarea {
+  width: 100%; padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  background: var(--bg); color: var(--text);
+  outline: none; transition: border .2s;
+}
+.modal input:focus, .modal select:focus, .modal textarea:focus {
+  border-color: var(--primary);
+}
+.modal textarea { resize: vertical; min-height: 60px; }
+.modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 
-/* 操作 */
-.acts{display:flex;gap:6px;margin-top:10px}
-.acts button{flex:1;padding:9px 0;border:none;border-radius:10px;font-size:12px;font-weight:700;
-  cursor:pointer;transition:all .12s;display:flex;align-items:center;justify-content:center;gap:4px}
-.acts button:active{transform:scale(.95)}
-.a-copy{background:#f0f5ff;color:var(--accent)}
-.a-edit{background:#f0fdf4;color:#16a34a}
-.a-pin{background:#fffbeb;color:#d97706}
-.a-del{background:#fef2f2;color:var(--red)}
+/* ── 颜色选择器 ─────────────────────── */
+.color-options { display: flex; gap: 8px; flex-wrap: wrap; }
+.color-opt {
+  width: 24px; height: 24px; border-radius: 50%;
+  border: 2px solid transparent; cursor: pointer;
+  transition: all .2s;
+}
+.color-opt:hover, .color-opt.active {
+  border-color: var(--text);
+  transform: scale(1.15);
+}
 
-/* Toast */
-.toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(.8);
-  background:rgba(0,0,0,.8);color:#fff;padding:12px 26px;border-radius:14px;
-  font-size:14px;font-weight:700;z-index:9999;opacity:0;pointer-events:none;
-  transition:all .25s;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-.toast.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+/* ── 提示 Toast ─────────────────────── */
+.toast {
+  position: fixed; bottom: 30px; left: 50%;
+  transform: translateX(-50%);
+  background: #323232; color: #fff;
+  padding: 10px 24px; border-radius: 8px;
+  font-size: 14px; z-index: 999;
+  box-shadow: 0 4px 12px rgba(0,0,0,.3);
+  animation: fadeUp .3s;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
-/* 模态框 */
-.mask{position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:1000;display:none;
-  align-items:flex-end;justify-content:center;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
-.mask.show{display:flex}
-.modal{background:var(--card);border-radius:20px 20px 0 0;width:100%;max-width:520px;
-  max-height:88vh;overflow-y:auto;padding:24px 20px calc(20px + env(safe-area-inset-bottom,0px));
-  animation:up .3s}
-@keyframes up{from{transform:translateY(100%)}to{transform:translateY(0)}}
-.modal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
-.modal-h h2{font-size:18px;font-weight:800}
-.modal-h button{width:30px;height:30px;border-radius:50%;background:#f5f5f7;border:none;
-  font-size:18px;color:var(--sub);cursor:pointer;display:flex;align-items:center;justify-content:center}
+/* ── 帮助 ───────────────────────────── */
+.help-section {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px; margin-top: 24px;
+  box-shadow: var(--shadow);
+}
+.help-section h3 { font-size: 15px; margin: 12px 0 6px; color: var(--primary); }
+.help-section p, .help-section li { font-size: 13px; color: var(--text2); line-height: 1.7; }
+.help-section pre {
+  background: var(--bg); padding: 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px; overflow-x: auto;
+  margin: 8px 0;
+}
+.help-section code {
+  background: var(--bg); padding: 2px 6px;
+  border-radius: 4px; font-size: 12px;
+}
 
-.fg{margin-bottom:14px}
-.fg label{display:block;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:5px;
-  text-transform:uppercase;letter-spacing:.5px}
-.fg input,.fg textarea,.fg select{width:100%;padding:12px 14px;border:1.5px solid rgba(0,0,0,.08);
-  border-radius:12px;font-size:14px;font-family:inherit;background:#f9fafb;transition:border .2s;outline:none}
-.fg input:focus,.fg textarea:focus{border-color:var(--accent);background:#fff}
-.fg textarea{resize:vertical;min-height:72px}
-.fg select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 14px center}
-.fcheck{display:flex;align-items:center;gap:8px;margin-bottom:16px}
-.fcheck input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent);border-radius:6px}
-.fcheck label{font-size:13px;font-weight:600}
-.btn-sub{width:100%;padding:14px;border:none;border-radius:14px;background:var(--accent);
-  color:#fff;font-size:15px;font-weight:800;cursor:pointer;transition:all .15s}
-.btn-sub:active{transform:scale(.98);background:#0070e0}
+/* ── 空状态 ─────────────────────────── */
+.empty {
+  text-align: center; padding: 60px 20px;
+  color: var(--text2);
+}
+.empty .icon { font-size: 48px; margin-bottom: 12px; }
+.empty p { font-size: 14px; }
 
-/* 上传区 */
-.upload-zone{border:2px dashed rgba(0,0,0,.1);border-radius:14px;padding:24px;text-align:center;
-  cursor:pointer;transition:all .2s;background:#fafbfc;margin-bottom:10px;position:relative}
-.upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:#f0f5ff}
-.upload-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
-.upload-zone .uz-icon{font-size:28px;margin-bottom:6px}
-.upload-zone p{font-size:13px;color:var(--sub);font-weight:600}
-.upload-zone .uz-hint{font-size:11px;color:#bbb;margin-top:4px}
-.upload-progress{display:none;margin-bottom:10px}
-.upload-progress .bar-bg{height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden}
-.upload-progress .bar-fill{height:100%;background:linear-gradient(90deg,#667eea,#764ba2);
-  border-radius:3px;transition:width .3s;width:0}
-.upload-progress p{font-size:11px;color:var(--sub);margin-top:4px;text-align:center;font-weight:600}
+/* ── 统计栏 ─────────────────────────── */
+.stats {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  margin-bottom: 16px; font-size: 13px; color: var(--text2);
+}
+.stats span { display: flex; align-items: center; gap: 4px; }
 
-/* 上传预览 */
-.upload-preview{border-radius:12px;overflow:hidden;margin-bottom:10px;background:#f5f5f7;position:relative;display:none}
-.upload-preview img{width:100%;max-height:200px;object-fit:contain;display:block}
-.upload-preview .up-del{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;
-  background:rgba(0,0,0,.6);color:#fff;border:none;font-size:14px;cursor:pointer;
-  display:flex;align-items:center;justify-content:center}
+/* ── 分组管理列表 ──────────────────── */
+.group-manage-list { display: flex; flex-direction: column; gap: 8px; }
+.group-manage-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+}
+.group-manage-item input {
+  flex: 1; border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px;
+  background: var(--card-bg); color: var(--text);
+  font-size: 13px; outline: none;
+}
 
-/* Gallery 模态 */
-.gallery-mask{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:2000;display:none;
-  align-items:center;justify-content:center;cursor:zoom-out;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
-.gallery-mask.show{display:flex}
-.gallery-mask img,.gallery-mask video{max-width:96%;max-height:90vh;object-fit:contain;border-radius:8px}
-.gallery-close{position:fixed;top:16px;right:16px;z-index:2001;width:36px;height:36px;
-  border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:20px;
-  cursor:pointer;display:none;align-items:center;justify-content:center}
-.gallery-mask.show ~ .gallery-close{display:flex}
-
-/* KV 教程 */
-.guide h3{font-size:14px;font-weight:800;margin:14px 0 6px;color:var(--text)}
-.guide h3:first-child{margin-top:0}
-.guide p{font-size:13px;color:#555;line-height:1.7;margin-bottom:4px}
-.guide code{background:#f1f5f9;padding:2px 7px;border-radius:5px;font-size:11px;color:#6366f1;
-  font-family:"SF Mono",Monaco,monospace}
-.guide pre{background:#1a1a2e;color:#e2e8f0;padding:14px;border-radius:12px;overflow-x:auto;
-  font-size:11px;line-height:1.6;margin:8px 0 12px;font-family:"SF Mono",Monaco,monospace}
-.guide ol{padding-left:20px;font-size:13px;color:#555;line-height:2.2}
-
-.empty{text-align:center;padding:50px 20px;color:var(--sub)}
-.empty-ico{font-size:42px;margin-bottom:10px;opacity:.6}
-.empty p{font-size:14px}
-
-/* 图床上传弹窗 */
-.img-result{background:#f9fafb;border:1px solid rgba(0,0,0,.06);border-radius:12px;padding:12px;margin-top:10px}
-.img-result img{width:100%;max-height:200px;object-fit:contain;border-radius:8px;margin-bottom:8px}
-.img-result .ir-url{font-size:12px;word-break:break-all;color:#6366f1;font-family:"SF Mono",Monaco,monospace;
-  background:#eef2ff;padding:8px 10px;border-radius:8px;margin-bottom:8px}
-.img-result .ir-acts{display:flex;gap:6px}
-.img-result .ir-acts button{flex:1;padding:8px 0;border:none;border-radius:8px;font-size:12px;
-  font-weight:700;cursor:pointer}
-
-/* 图片上传历史 */
-.hist-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
-.hist-item{position:relative;border-radius:10px;overflow:hidden;background:#f5f5f7;aspect-ratio:1;cursor:pointer}
-.hist-item img{width:100%;height:100%;object-fit:cover}
-.hist-item .hi-copy{position:absolute;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;
-  justify-content:center;opacity:0;transition:opacity .2s;color:#fff;font-size:12px;font-weight:700}
-.hist-item:active .hi-copy{opacity:1}
+/* ── 响应式 ─────────────────────────── */
+@media (max-width: 640px) {
+  .topbar { padding: 10px 14px; }
+  .topbar h1 { font-size: 17px; }
+  .search-box { min-width: 140px; }
+  .container { padding: 14px; }
+  .card .card-actions { opacity: 1; }
+  .card .drag-handle { opacity: .4; }
+  .btn { padding: 6px 10px; font-size: 12px; }
+}
 </style>
 </head>
 <body>
 
-<div class="wrap" id="app">
-  <div class="hdr">
-    <h1>InfoBox</h1>
-    <span class="badge" id="kvB">检测中…</span>
+<!-- ── 顶栏 ── -->
+<div class="topbar">
+  <h1>📦 <span>Info</span>Box</h1>
+  <div class="search-box">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+    <input id="searchInput" type="text" placeholder="搜索..." oninput="renderCards()">
   </div>
-  <div class="bar">
-    <button class="b-add" onclick="openAdd()">＋ 添加</button>
-    <button class="b-img" onclick="openUpload()">📷 图床</button>
-    <button class="b-tog" onclick="togAll()">📂</button>
-    <button class="b-kv" onclick="openKV()">?</button>
-  </div>
-  <div id="list"></div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<!-- 添加/编辑 -->
-<div class="mask" id="formM">
-  <div class="modal">
-    <div class="modal-h"><h2 id="fTitle">添加信息</h2><button onclick="closeM('formM')">✕</button></div>
-    <div class="fg">
-      <label>类型</label>
-      <select id="fType" onchange="onTypeChg()">
-        <option value="text">📝 文本</option>
-        <option value="link">🔗 链接</option>
-        <option value="image">🖼️ 图片</option>
-        <option value="video">🎬 视频</option>
-      </select>
+  <button class="btn btn-primary" onclick="openAddModal()">＋ 新增</button>
+  <button class="btn btn-outline" onclick="openGroupModal()">📁 分组</button>
+  <button class="btn btn-outline" onclick="toggleBatch()">☑ 批量</button>
+  <div style="position:relative;display:inline-block">
+    <button class="btn btn-outline" onclick="toggleMenu(this)">⋯ 更多</button>
+    <div class="dropdown-menu" style="display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);min-width:140px;z-index:10;padding:4px;">
+      <div class="dropdown-item" style="padding:8px 14px;cursor:pointer;font-size:13px;border-radius:6px;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="exportData()">📤 导出 JSON</div>
+      <div class="dropdown-item" style="padding:8px 14px;cursor:pointer;font-size:13px;border-radius:6px;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="importData()">📥 导入 JSON</div>
+      <div class="dropdown-item" style="padding:8px 14px;cursor:pointer;font-size:13px;border-radius:6px;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="toggleDark()">🌙 深色模式</div>
+      <div class="dropdown-item" style="padding:8px 14px;cursor:pointer;font-size:13px;border-radius:6px;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="toggleHelp()">❓ 使用帮助</div>
     </div>
-    <div class="fg"><label>标签名称</label><input id="fLabel" placeholder="如：邮箱、API Key…"></div>
-
-    <!-- 图片/视频上传区 -->
-    <div id="uploadArea" style="display:none">
-      <div class="upload-zone" id="dropZone">
-        <input type="file" id="fileInput" accept="image/*,video/*" onchange="handleFile(this)">
-        <div class="uz-icon">📤</div>
-        <p>点击选择或拖拽文件</p>
-        <div class="uz-hint">支持 jpg/png/gif/mp4 · 最大 5MB</div>
-      </div>
-      <div class="upload-progress" id="upProgress">
-        <div class="bar-bg"><div class="bar-fill" id="upBar"></div></div>
-        <p id="upText">上传中…</p>
-      </div>
-      <div class="upload-preview" id="upPreview">
-        <img id="upImg">
-        <button class="up-del" onclick="clearUpload()">✕</button>
-      </div>
-    </div>
-
-    <div class="fg" id="fValueWrap">
-      <label id="fValL">内容</label>
-      <textarea id="fValue" placeholder="输入内容…"></textarea>
-    </div>
-    <div class="fcheck"><input type="checkbox" id="fPin"><label for="fPin">📌 置顶显示</label></div>
-    <input type="hidden" id="fId">
-    <button class="btn-sub" onclick="submitForm()">保存</button>
   </div>
 </div>
 
-<!-- 图床上传 -->
-<div class="mask" id="imgM">
-  <div class="modal">
-    <div class="modal-h"><h2>📷 图床上传</h2><button onclick="closeM('imgM')">✕</button></div>
-    <div class="upload-zone" id="dropZone2">
-      <input type="file" id="fileInput2" accept="image/*,video/*" multiple onchange="handleImgUpload(this)">
-      <div class="uz-icon">🖼️</div>
-      <p>选择图片或视频上传到图床</p>
-      <div class="uz-hint">支持 jpg/png/gif/mp4 · 最大 5MB · 可多选</div>
-    </div>
-    <div class="upload-progress" id="upProgress2">
-      <div class="bar-bg"><div class="bar-fill" id="upBar2"></div></div>
-      <p id="upText2">上传中…</p>
-    </div>
-    <div id="imgResults"></div>
-  </div>
-</div>
+<!-- ── 主内容 ── -->
+<div class="container">
+  <!-- 统计 -->
+  <div class="stats" id="stats"></div>
 
-<!-- KV教程 -->
-<div class="mask" id="kvM">
-  <div class="modal">
-    <div class="modal-h"><h2>📖 KV 教程</h2><button onclick="closeM('kvM')">✕</button></div>
-    <div class="guide">
-      <h3>什么是 KV？</h3>
-      <p>Cloudflare KV 是全球分布式键值存储，绑定后数据持久保存在云端。</p>
-      <h3>3 步开启</h3>
-      <ol>
-        <li>Dashboard → <code>Workers & Pages</code> → <code>KV</code> → <code>Create a namespace</code></li>
-        <li>进入 Worker → <code>Settings</code> → <code>Bindings</code> → <code>Add</code> → <code>KV Namespace</code></li>
-        <li>变量名填 <code>INFO_KV</code>，选择刚创建的 namespace，保存部署</li>
-      </ol>
-      <h3>图床配置</h3>
-      <p>代码顶部 <code>IMG_HOST</code> 设置你的图床地址。上传后图片 URL 自动填入。</p>
-      <h3>JSON 格式参考</h3>
+  <!-- 分组标签 -->
+  <div class="group-tabs" id="groupTabs"></div>
+
+  <!-- 批量操作栏 -->
+  <div id="batchBar" style="display:none;margin-bottom:12px;display:none;gap:8px;align-items:center;">
+    <button class="btn btn-danger btn-sm" onclick="batchDelete()">🗑 删除选中</button>
+    <button class="btn btn-outline btn-sm" onclick="batchMove()">📁 移动到分组</button>
+    <button class="btn btn-outline btn-sm" onclick="selectAll()">全选</button>
+    <button class="btn btn-outline btn-sm" onclick="cancelBatch()">取消</button>
+    <span id="batchCount" style="font-size:13px;color:var(--text2);margin-left:8px;"></span>
+  </div>
+
+  <!-- 卡片列表 -->
+  <div class="card-list" id="cardList"></div>
+
+  <!-- 帮助 -->
+  <div class="help-section" id="helpSection" style="display:none;">
+    <h2>📖 使用帮助</h2>
+    <h3>什么是 KV？</h3>
+    <p>Cloudflare KV 是全球分布式键值存储，绑定后数据持久保存在云端。</p>
+    <h3>3 步开启</h3>
+    <ol>
+      <li>Dashboard → <code>Workers & Pages</code> → <code>KV</code> → <code>Create a namespace</code></li>
+      <li>进入 Worker → <code>Settings</code> → <code>Bindings</code> → <code>Add</code> → <code>KV Namespace</code></li>
+      <li>变量名填 <code>INFO_KV</code>，选择刚创建的 namespace，保存部署</li>
+    </ol>
+    <h3>图床配置</h3>
+    <p>代码顶部 <code>IMG_HOST</code> 设置你的图床地址。上传后图片 URL 自动填入。</p>
+    <h3>分组功能</h3>
+    <p>点击顶栏 <strong>📁 分组</strong> 按钮管理分组。新增/编辑卡片时可选择分组。点击分组标签可过滤显示。</p>
+    <h3>JSON 格式参考</h3>
 <pre>[
-  { "id":"1", "type":"text", "label":"邮箱", "value":"xx@xx.com", "pinned":true },
-  { "id":"2", "type":"image", "label":"截图", "value":"https://xx/file/xx.jpg", "pinned":false }
+  { "id":"1", "type":"text", "label":"邮箱", "value":"xx@xx.com", "pinned":true, "group":"默认" },
+  { "id":"2", "type":"image", "label":"截图", "value":"https://xx/file/xx.jpg", "pinned":false, "group":"图片" }
 ]</pre>
-      <p>type 可选：<code>text</code> <code>link</code> <code>image</code> <code>video</code></p>
-    </div>
+    <p>type 可选：<code>text</code> <code>link</code> <code>image</code> <code>video</code></p>
   </div>
 </div>
 
-<!-- 全屏预览 -->
-<div class="gallery-mask" id="gallery" onclick="closeGallery()"></div>
-<button class="gallery-close" id="galleryClose" onclick="closeGallery()">✕</button>
+<!-- ── 隐藏文件选择器 ── -->
+<input type="file" id="importFile" style="display:none" accept=".json" onchange="doImport(event)">
 
 <script>
-const IMG_HOST="${IMG_HOST}";
-let items=[],allOpen=false,hasKV=false;
+// ── 状态 ──────────────────────────────
+let items = [];
+let groups = [];
+let activeGroup = '__all__';
+let batchMode = false;
+let selected = new Set();
 
-async function load(){
-  try{
-    const r=await fetch('/api/items');
-    const d=await r.json();
-    items=d.items||[];hasKV=d.hasKV;
-    const b=document.getElementById('kvB');
-    b.textContent=hasKV?'● KV 已连接':'○ 本地模式';
-    b.className='badge '+(hasKV?'badge-on':'badge-off');
-    render();
-  }catch{document.getElementById('list').innerHTML='<div class="empty"><div class="empty-ico">⚠️</div><p>加载失败</p></div>'}
-}
+const COLORS = ['#3b82f6','#ef4444','#10b981','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#84cc16','#6b7280'];
 
-function render(){
-  const el=document.getElementById('list');
-  if(!items.length){el.innerHTML='<div class="empty"><div class="empty-ico">📭</div><p>暂无信息，点击「添加」开始</p></div>';return}
-  const pinned=items.filter(i=>i.pinned);
-  const normal=items.filter(i=>!i.pinned);
-  let html='';
-  if(pinned.length) html+='<div class="section-title"><span>📌</span> 置顶</div>'+pinned.map(renderCard).join('');
-  if(normal.length) html+=(pinned.length?'<div class="section-title"><span>📋</span> 全部</div>':'')+normal.map(renderCard).join('');
-  el.innerHTML=html;
-}
-
-function renderCard(item){
-  const ic={text:'ico-text',link:'ico-link',image:'ico-image',video:'ico-video'}[item.type]||'ico-text';
-  const em={text:'📝',link:'🔗',image:'🖼️',video:'🎬'}[item.type]||'📝';
-  const pv=(item.value||'').length>36?item.value.substring(0,36)+'…':item.value;
-  let body='';
-  if(item.type==='image')
-    body+='<div class="media" onclick="event.stopPropagation();openGallery(\\''+esc(item.value)+'\\',\\'img\\')"><img src="'+esc(item.value)+'" loading="lazy" onerror="this.parentElement.innerHTML=\\'<div class=media-err>图片加载失败</div>\\'"></div>';
-  if(item.type==='video')
-    body+='<div class="media" onclick="event.stopPropagation()"><video controls playsinline preload="metadata" src="'+esc(item.value)+'"></video></div>';
-  body+='<div class="val'+(item.type==='link'?' is-link':'')+'"'+(item.type==='link'?' onclick="event.stopPropagation();window.open(\\''+esc(item.value)+'\\',\\'_blank\\')"':'')+'>'+escH(item.value)+'</div>';
-  body+='<div class="acts">'+
-    '<button class="a-copy" onclick="event.stopPropagation();cp(\\''+esc(item.value)+'\\')">📋 复制</button>'+
-    '<button class="a-edit" onclick="event.stopPropagation();editItem(\\''+esc(item.id)+'\\')">✏️ 编辑</button>'+
-    '<button class="a-pin" onclick="event.stopPropagation();togglePin(\\''+esc(item.id)+'\\')">📌</button>'+
-    '<button class="a-del" onclick="event.stopPropagation();delItem(\\''+esc(item.id)+'\\')">🗑️</button>'+
-  '</div>';
-  return '<div class="card" id="c-'+item.id+'">'+
-    '<div class="card-h" onclick="togCard(\\''+item.id+'\\')">'+
-      '<div class="card-ico '+ic+'">'+em+'</div>'+
-      '<div class="card-info"><h3>'+escH(item.label)+'</h3><p>'+escH(pv)+'</p></div>'+
-      (item.pinned?'<span class="pin-dot"></span>':'')+
-      '<span class="chev">▶</span>'+
-    '</div>'+
-    '<div class="card-b"><div class="card-inner">'+body+'</div></div>'+
-  '</div>';
-}
-
-function escH(s){return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):''}
-function esc(s){return s?s.replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\\\'").replace(/"/g,'\\\\"'):''}
-
-function togCard(id){document.getElementById('c-'+id)?.classList.toggle('open')}
-function togAll(){allOpen=!allOpen;document.querySelectorAll('.card').forEach(c=>{allOpen?c.classList.add('open'):c.classList.remove('open')})}
-
-async function cp(text){
-  try{await navigator.clipboard.writeText(text);toast('✅ 已复制')}
-  catch{const t=document.createElement('textarea');t.value=text;t.style.cssText='position:fixed;left:-9999px';
-    document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);toast('✅ 已复制')}
-}
-
-function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
-  clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),1400)}
-
-function openAdd(){
-  document.getElementById('fTitle').textContent='添加信息';
-  document.getElementById('fType').value='text';
-  document.getElementById('fLabel').value='';
-  document.getElementById('fValue').value='';
-  document.getElementById('fPin').checked=false;
-  document.getElementById('fId').value='';
-  clearUpload();onTypeChg();openM('formM');
-}
-
-function editItem(id){
-  const it=items.find(i=>i.id===id);if(!it)return;
-  document.getElementById('fTitle').textContent='编辑信息';
-  document.getElementById('fType').value=it.type||'text';
-  document.getElementById('fLabel').value=it.label;
-  document.getElementById('fValue').value=it.value;
-  document.getElementById('fPin').checked=!!it.pinned;
-  document.getElementById('fId').value=it.id;
-  clearUpload();onTypeChg();openM('formM');
-}
-
-function onTypeChg(){
-  const t=document.getElementById('fType').value;
-  const isMedia=t==='image'||t==='video';
-  document.getElementById('uploadArea').style.display=isMedia?'block':'none';
-  document.getElementById('fValueWrap').style.display='block';
-  const labels={text:'内容',link:'链接地址',image:'图片 URL（可上传自动填入）',video:'视频 URL（可上传自动填入）'};
-  document.getElementById('fValL').textContent=labels[t]||'内容';
-  document.getElementById('fValue').placeholder=t==='image'?'https://example.com/photo.jpg':t==='video'?'https://example.com/video.mp4':t==='link'?'https://...':'输入内容…';
-  document.getElementById('fileInput').accept=t==='video'?'video/*':'image/*';
-}
-
-// 表单内文件上传
-async function handleFile(input){
-  const file=input.files[0];if(!file)return;
-  if(file.size>5*1024*1024){toast('⚠️ 文件不能超过 5MB');return}
-  const prog=document.getElementById('upProgress');
-  const bar=document.getElementById('upBar');
-  const txt=document.getElementById('upText');
-  prog.style.display='block';bar.style.width='20%';txt.textContent='上传中…';
-
-  const fd=new FormData();fd.append('file',file);
-  try{
-    bar.style.width='60%';
-    const r=await fetch('/api/upload',{method:'POST',body:fd});
-    const d=await r.json();
-    bar.style.width='100%';txt.textContent='上传完成';
-    if(d.ok&&d.result&&d.result[0]){
-      const url=IMG_HOST+d.result[0].src;
-      document.getElementById('fValue').value=url;
-      // 显示预览
-      const pv=document.getElementById('upPreview');
-      const pvImg=document.getElementById('upImg');
-      if(file.type.startsWith('image')){pvImg.src=url;pv.style.display='block'}
-      toast('✅ 上传成功');
-    }else{toast('❌ 上传失败：'+(d.msg||'未知错误'))}
-    setTimeout(()=>{prog.style.display='none'},1500);
-  }catch(e){toast('❌ 上传失败');prog.style.display='none'}
-  input.value='';
-}
-
-function clearUpload(){
-  document.getElementById('upPreview').style.display='none';
-  document.getElementById('upImg').src='';
-  document.getElementById('upProgress').style.display='none';
-}
-
-async function submitForm(){
-  const label=document.getElementById('fLabel').value.trim();
-  const value=document.getElementById('fValue').value.trim();
-  if(!label||!value){toast('⚠️ 请填写完整');return}
-  const item={id:document.getElementById('fId').value||Date.now().toString(),
-    type:document.getElementById('fType').value,label,value,
-    pinned:document.getElementById('fPin').checked};
-  if(hasKV){
-    try{const r=await fetch('/api/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({item})});
-      const d=await r.json();if(d.ok){items=d.items;render();toast('✅ 已保存')}else toast('❌ '+(d.msg||'失败'))}
-    catch{toast('❌ 网络错误')}
-  }else{const idx=items.findIndex(i=>i.id===item.id);if(idx>=0)items[idx]=item;else items.push(item);render();toast('✅ 已保存（本地）')}
-  closeM('formM');
-}
-
-async function togglePin(id){
-  const it=items.find(i=>i.id===id);if(!it)return;
-  it.pinned=!it.pinned;
-  if(hasKV){
-    try{await fetch('/api/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({item:it})});
-      const r=await fetch('/api/items');const d=await r.json();items=d.items;render();toast(it.pinned?'📌 已置顶':'📌 取消置顶')}
-    catch{render();toast('❌ 操作失败')}
-  }else{render();toast(it.pinned?'📌 已置顶':'📌 取消置顶')}
-}
-
-async function delItem(id){
-  if(!confirm('确定删除？'))return;
-  if(hasKV){
-    try{const r=await fetch('/api/items',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
-      const d=await r.json();if(d.ok){items=d.items;render();toast('🗑️ 已删除')}}
-    catch{toast('❌ 删除失败')}
-  }else{items=items.filter(i=>i.id!==id);render();toast('🗑️ 已删除')}
-}
-
-// 图床独立上传
-async function handleImgUpload(input){
-  const files=input.files;if(!files.length)return;
-  const prog=document.getElementById('upProgress2');
-  const bar=document.getElementById('upBar2');
-  const txt=document.getElementById('upText2');
-  const results=document.getElementById('imgResults');
-  prog.style.display='block';
-
-  for(let i=0;i<files.length;i++){
-    const file=files[i];
-    if(file.size>5*1024*1024){toast('⚠️ '+file.name+' 超过 5MB，跳过');continue}
-    const pct=Math.round(((i)/files.length)*100);
-    bar.style.width=pct+'%';txt.textContent='上传 '+(i+1)+'/'+files.length+'…';
-
-    const fd=new FormData();fd.append('file',file);
-    try{
-      const r=await fetch('/api/upload',{method:'POST',body:fd});
-      const d=await r.json();
-      if(d.ok&&d.result&&d.result[0]){
-        const url=IMG_HOST+d.result[0].src;
-        const isVideo=file.type.startsWith('video');
-        const div=document.createElement('div');div.className='img-result';
-        div.innerHTML=(isVideo?'<video src="'+url+'" controls playsinline style="width:100%;max-height:200px;border-radius:8px;margin-bottom:8px"></video>':'<img src="'+url+'">')+
-          '<div class="ir-url">'+url+'</div>'+
-          '<div class="ir-acts">'+
-            '<button style="background:#f0f5ff;color:#0a84ff" onclick="cp(\\''+url.replace(/'/g,"\\\\'")+'\\')">📋 复制链接</button>'+
-            '<button style="background:#eef2ff;color:#6366f1" onclick="cp(\\'![img]('+url.replace(/'/g,"\\\\'")+')\\')">[MD] 复制</button>'+
-            '<button style="background:#f0fdf4;color:#16a34a" onclick="addAsItem(\\''+url.replace(/'/g,"\\\\'")+'\\',\\''+(isVideo?'video':'image')+'\\')">＋ 添加到面板</button>'+
-          '</div>';
-        results.prepend(div);
-      }else{toast('❌ 上传失败')}
-    }catch{toast('❌ '+file.name+' 上传失败')}
-  }
-  bar.style.width='100%';txt.textContent='全部完成';
-  setTimeout(()=>{prog.style.display='none'},2000);
-  input.value='';
-}
-
-function addAsItem(url,type){
-  document.getElementById('fType').value=type;
-  document.getElementById('fLabel').value=type==='video'?'视频':'图片';
-  document.getElementById('fValue').value=url;
-  document.getElementById('fPin').checked=false;
-  document.getElementById('fId').value='';
-  document.getElementById('fTitle').textContent='添加信息';
-  clearUpload();onTypeChg();closeM('imgM');openM('formM');
-}
-
-// 全屏预览
-function openGallery(url,type){
-  const g=document.getElementById('gallery');
-  g.innerHTML=type==='img'?'<img src="'+url+'">':'<video src="'+url+'" controls playsinline autoplay></video>';
-  g.classList.add('show');
-}
-function closeGallery(){document.getElementById('gallery').classList.remove('show')}
-
-function openM(id){document.getElementById(id).classList.add('show')}
-function closeM(id){document.getElementById(id).classList.remove('show')}
-function openKV(){openM('kvM')}
-function openUpload(){document.getElementById('imgResults').innerHTML='';document.getElementById('upProgress2').style.display='none';openM('imgM')}
-
-document.querySelectorAll('.mask').forEach(m=>{m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('show')})});
-
-// 拖拽上传
-['dropZone','dropZone2'].forEach(id=>{
-  const z=document.getElementById(id);if(!z)return;
-  z.addEventListener('dragover',e=>{e.preventDefault();z.classList.add('drag')});
-  z.addEventListener('dragleave',()=>z.classList.remove('drag'));
-  z.addEventListener('drop',e=>{e.preventDefault();z.classList.remove('drag');
-    const input=z.querySelector('input[type=file]');
-    const dt=new DataTransfer();
-    for(const f of e.dataTransfer.files)dt.items.add(f);
-    input.files=dt.files;input.dispatchEvent(new Event('change'));
-  });
+// ── 初始化 ────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  // 深色模式记忆
+  if (localStorage.getItem('dark') === '1') document.body.classList.add('dark');
+  await loadData();
+  renderAll();
 });
 
-load();
+// ── 数据交互 ──────────────────────────
+async function loadData() {
+  try {
+    const resp = await fetch('/api/data');
+    const data = await resp.json();
+    items = data.items || [];
+    groups = data.groups || [];
+  } catch {
+    items = [];
+    groups = [];
+  }
+}
+
+async function saveData() {
+  try {
+    const resp = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, groups })
+    });
+    const data = await resp.json();
+    if (!data.ok) toast('保存失败: ' + (data.msg || ''), 'error');
+    else toast('已保存 ✓');
+  } catch (e) {
+    toast('网络错误', 'error');
+  }
+}
+
+// ── 渲染 ──────────────────────────────
+function renderAll() {
+  renderStats();
+  renderGroupTabs();
+  renderCards();
+}
+
+function renderStats() {
+  const pinned = items.filter(i => i.pinned).length;
+  const el = document.getElementById('stats');
+  el.innerHTML = \`
+    <span>📊 共 <strong>\${items.length}</strong> 条</span>
+    <span>📌 置顶 <strong>\${pinned}</strong></span>
+    <span>📁 分组 <strong>\${groups.length}</strong></span>
+  \`;
+}
+
+function renderGroupTabs() {
+  const el = document.getElementById('groupTabs');
+  const allCount = items.length;
+  let html = \`<div class="group-tab \${activeGroup === '__all__' ? 'active' : ''}"
+                   onclick="setGroup('__all__')">全部<span class="count">\${allCount}</span></div>\`;
+
+  // 未分组
+  const ungrouped = items.filter(i => !i.group).length;
+  if (ungrouped > 0) {
+    html += \`<div class="group-tab \${activeGroup === '__none__' ? 'active' : ''}"
+                  onclick="setGroup('__none__')">未分组<span class="count">\${ungrouped}</span></div>\`;
+  }
+
+  groups.forEach(g => {
+    const c = items.filter(i => i.group === g.name).length;
+    html += \`<div class="group-tab \${activeGroup === g.name ? 'active' : ''}"
+                  onclick="setGroup('\${esc(g.name)}')"
+                  style="border-color:\${g.color || 'var(--border)'}"
+                  >\${esc(g.name)}<span class="count">\${c}</span></div>\`;
+  });
+  el.innerHTML = html;
+}
+
+function renderCards() {
+  const el = document.getElementById('cardList');
+  const search = document.getElementById('searchInput').value.toLowerCase().trim();
+
+  let filtered = [...items];
+
+  // 分组过滤
+  if (activeGroup === '__none__') {
+    filtered = filtered.filter(i => !i.group);
+  } else if (activeGroup !== '__all__') {
+    filtered = filtered.filter(i => i.group === activeGroup);
+  }
+
+  // 搜索过滤
+  if (search) {
+    filtered = filtered.filter(i =>
+      (i.label || '').toLowerCase().includes(search) ||
+      (i.value || '').toLowerCase().includes(search) ||
+      (i.group || '').toLowerCase().includes(search)
+    );
+  }
+
+  // 排序：pinned 优先
+  filtered.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  if (filtered.length === 0) {
+    el.innerHTML = \`<div class="empty"><div class="icon">📭</div><p>\${search ? '没有匹配的结果' : '还没有信息，点击 ＋ 新增'}</p></div>\`;
+    return;
+  }
+
+  el.innerHTML = filtered.map(item => {
+    const g = groups.find(g => g.name === item.group);
+    const color = item.color || (g && g.color) || '#6b7280';
+    const idx = items.indexOf(item);
+    return \`
+    <div class="card \${item.pinned ? 'pinned' : ''}"
+         draggable="true"
+         ondragstart="dragStart(event, \${idx})"
+         ondragover="dragOver(event)"
+         ondrop="drop(event, \${idx})"
+         ondragend="dragEnd(event)">
+      \${batchMode ? \`<input type="checkbox" \${selected.has(item.id) ? 'checked' : ''} onchange="toggleSelect('\${item.id}')">\` : ''}
+      <span class="drag-handle" title="拖拽排序">⠿</span>
+      <span class="color-dot" style="background:\${color}"></span>
+      <div class="card-body">
+        <div class="card-label">
+          \${esc(item.label || '未命名')}
+          <span class="badge">\${item.type || 'text'}</span>
+          \${item.group ? \`<span style="font-size:11px;color:var(--text2);">📁 \${esc(item.group)}</span>\` : ''}
+          \${item.pinned ? '<span style="font-size:11px;">📌</span>' : ''}
+        </div>
+        <div class="card-value">\${renderValue(item)}</div>
+      </div>
+      <div class="card-actions">
+        <button class="btn-icon" title="复制" onclick="copyValue(\${idx})">📋</button>
+        <button class="btn-icon" title="\${item.pinned ? '取消置顶' : '置顶'}" onclick="togglePin(\${idx})">\${item.pinned ? '📌' : '📍'}</button>
+        <button class="btn-icon" title="编辑" onclick="openEditModal(\${idx})">✏️</button>
+        <button class="btn-icon" title="删除" onclick="deleteItem(\${idx})">🗑️</button>
+      </div>
+    </div>\`;
+  }).join('');
+}
+
+function renderValue(item) {
+  const v = item.value || '';
+  switch (item.type) {
+    case 'link':
+      return \`<a href="\${esc(v)}" target="_blank" rel="noopener">\${esc(v)}</a>\`;
+    case 'image':
+      return \`<img src="\${esc(v)}" alt="\${esc(item.label)}" onclick="window.open('\${esc(v)}')" loading="lazy">\`;
+    case 'video':
+      return \`<video src="\${esc(v)}" controls preload="metadata"></video>\`;
+    default:
+      return esc(v);
+  }
+}
+
+// ── 分组切换 ──────────────────────────
+function setGroup(name) {
+  activeGroup = name;
+  renderGroupTabs();
+  renderCards();
+}
+
+// ── 新增卡片 ──────────────────────────
+function openAddModal() {
+  showCardModal({
+    title: '新增信息',
+    item: { id: genId(), type: 'text', label: '', value: '', pinned: false, group: activeGroup === '__all__' || activeGroup === '__none__' ? '' : activeGroup, color: '' },
+    onSave: (item) => {
+      items.push(item);
+      saveData();
+      renderAll();
+    }
+  });
+}
+
+// ── 编辑卡片 ──────────────────────────
+function openEditModal(idx) {
+  const item = { ...items[idx] };
+  showCardModal({
+    title: '编辑信息',
+    item,
+    onSave: (updated) => {
+      items[idx] = updated;
+      saveData();
+      renderAll();
+    }
+  });
+}
+
+// ── 卡片模态框 ────────────────────────
+function showCardModal({ title, item, onSave }) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  const groupOptions = groups.map(g => \`<option value="\${esc(g.name)}" \${item.group === g.name ? 'selected' : ''}>\${esc(g.name)}</option>\`).join('');
+  const colorDots = COLORS.map(c => \`<span class="color-opt \${item.color === c ? 'active' : ''}" style="background:\${c}" data-color="\${c}"></span>\`).join('');
+
+  mask.innerHTML = \`
+  <div class="modal">
+    <h2>\${title}</h2>
+    <div class="form-group">
+      <label>类型</label>
+      <select id="m_type">
+        <option value="text" \${item.type === 'text' ? 'selected' : ''}>📝 文本 (text)</option>
+        <option value="link" \${item.type === 'link' ? 'selected' : ''}>🔗 链接 (link)</option>
+        <option value="image" \${item.type === 'image' ? 'selected' : ''}>🖼️ 图片 (image)</option>
+        <option value="video" \${item.type === 'video' ? 'selected' : ''}>🎬 视频 (video)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>标签名称</label>
+      <input id="m_label" value="\${esc(item.label)}" placeholder="如：邮箱、密码、截图…">
+    </div>
+    <div class="form-group">
+      <label>内容</label>
+      <textarea id="m_value" placeholder="文本内容或 URL">\${esc(item.value)}</textarea>
+    </div>
+    <div class="form-group">
+      <label>分组</label>
+      <select id="m_group">
+        <option value="">— 无分组 —</option>
+        \${groupOptions}
+      </select>
+    </div>
+    <div class="form-group">
+      <label>颜色标签</label>
+      <div class="color-options" id="m_colors">\${colorDots}
+        <span class="color-opt \${!item.color ? 'active' : ''}" style="background:#ccc;position:relative" data-color="">✕</span>
+      </div>
+    </div>
+    <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="m_pinned" \${item.pinned ? 'checked' : ''} style="width:auto;">
+      <label for="m_pinned" style="margin:0;">置顶显示</label>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-outline" onclick="this.closest('.modal-mask').remove()">取消</button>
+      <button class="btn btn-primary" id="m_save">保存</button>
+    </div>
+  </div>\`;
+
+  document.body.appendChild(mask);
+  mask.addEventListener('click', e => { if (e.target === mask) mask.remove(); });
+
+  // 颜色点击
+  let pickedColor = item.color || '';
+  mask.querySelectorAll('.color-opt').forEach(dot => {
+    dot.addEventListener('click', () => {
+      mask.querySelectorAll('.color-opt').forEach(d => d.classList.remove('active'));
+      dot.classList.add('active');
+      pickedColor = dot.dataset.color;
+    });
+  });
+
+  mask.querySelector('#m_save').addEventListener('click', () => {
+    const updated = {
+      ...item,
+      type: mask.querySelector('#m_type').value,
+      label: mask.querySelector('#m_label').value.trim(),
+      value: mask.querySelector('#m_value').value.trim(),
+      group: mask.querySelector('#m_group').value,
+      pinned: mask.querySelector('#m_pinned').checked,
+      color: pickedColor
+    };
+    if (!updated.label) { toast('请填写标签名称', 'error'); return; }
+    onSave(updated);
+    mask.remove();
+  });
+}
+
+// ── 删除 ──────────────────────────────
+function deleteItem(idx) {
+  if (!confirm('确定删除「' + (items[idx].label || '') + '」？')) return;
+  items.splice(idx, 1);
+  saveData();
+  renderAll();
+}
+
+// ── 置顶 ──────────────────────────────
+function togglePin(idx) {
+  items[idx].pinned = !items[idx].pinned;
+  saveData();
+  renderAll();
+}
+
+// ── 复制 ──────────────────────────────
+function copyValue(idx) {
+  const v = items[idx].value || '';
+  navigator.clipboard.writeText(v).then(() => toast('已复制 ✓')).catch(() => {
+    // fallback
+    const ta = document.createElement('textarea');
+    ta.value = v; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('已复制 ✓');
+  });
+}
+
+// ── 拖拽排序 ──────────────────────────
+let dragIdx = null;
+function dragStart(e, idx) {
+  dragIdx = idx;
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function dragOver(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }
+function drop(e, idx) {
+  e.preventDefault();
+  if (dragIdx === null || dragIdx === idx) return;
+  const [moved] = items.splice(dragIdx, 1);
+  items.splice(idx, 0, moved);
+  dragIdx = null;
+  saveData();
+  renderAll();
+}
+function dragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  dragIdx = null;
+}
+
+// ── 批量操作 ──────────────────────────
+function toggleBatch() {
+  batchMode = !batchMode;
+  selected.clear();
+  document.getElementById('batchBar').style.display = batchMode ? 'flex' : 'none';
+  renderCards();
+  updateBatchCount();
+}
+function cancelBatch() {
+  batchMode = false;
+  selected.clear();
+  document.getElementById('batchBar').style.display = 'none';
+  renderCards();
+}
+function toggleSelect(id) {
+  selected.has(id) ? selected.delete(id) : selected.add(id);
+  updateBatchCount();
+}
+function selectAll() {
+  items.forEach(i => selected.add(i.id));
+  renderCards();
+  updateBatchCount();
+}
+function updateBatchCount() {
+  document.getElementById('batchCount').textContent = \`已选 \${selected.size} 项\`;
+}
+function batchDelete() {
+  if (selected.size === 0) { toast('请先选择'); return; }
+  if (!confirm(\`确定删除 \${selected.size} 条信息？\`)) return;
+  items = items.filter(i => !selected.has(i.id));
+  selected.clear();
+  batchMode = false;
+  document.getElementById('batchBar').style.display = 'none';
+  saveData();
+  renderAll();
+}
+function batchMove() {
+  if (selected.size === 0) { toast('请先选择'); return; }
+  if (groups.length === 0) { toast('请先创建分组'); return; }
+  const name = prompt('移动到分组：\\n' + groups.map(g => g.name).join('、'));
+  if (!name) return;
+  if (!groups.find(g => g.name === name)) { toast('分组不存在'); return; }
+  items.forEach(i => { if (selected.has(i.id)) i.group = name; });
+  selected.clear();
+  batchMode = false;
+  document.getElementById('batchBar').style.display = 'none';
+  saveData();
+  renderAll();
+}
+
+// ── 分组管理模态框 ────────────────────
+function openGroupModal() {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = \`
+  <div class="modal">
+    <h2>📁 分组管理</h2>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px;">管理你的信息分组，拖拽可排序</p>
+    <div class="group-manage-list" id="groupManageList"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <input id="newGroupName" placeholder="新分组名称" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);outline:none;font-size:13px;">
+      <button class="btn btn-primary btn-sm" onclick="addGroupFromModal()">添加</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-outline" onclick="this.closest('.modal-mask').remove()">关闭</button>
+    </div>
+  </div>\`;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', e => { if (e.target === mask) mask.remove(); });
+  renderGroupManageList();
+}
+
+function renderGroupManageList() {
+  const el = document.getElementById('groupManageList');
+  if (!el) return;
+  if (groups.length === 0) {
+    el.innerHTML = '<p style="text-align:center;color:var(--text2);font-size:13px;padding:16px;">暂无分组</p>';
+    return;
+  }
+  el.innerHTML = groups.map((g, i) => {
+    const count = items.filter(it => it.group === g.name).length;
+    const colorDots = COLORS.map(c =>
+      \`<span class="color-opt \${g.color === c ? 'active' : ''}" style="background:\${c};width:18px;height:18px;" onclick="setGroupColor(\${i},'\${c}')"></span>\`
+    ).join('');
+    return \`
+    <div class="group-manage-item">
+      <span style="font-size:14px;">📁</span>
+      <input value="\${esc(g.name)}" onchange="renameGroup(\${i}, this.value)">
+      <span style="font-size:12px;color:var(--text2);white-space:nowrap;">\${count}条</span>
+      <div style="display:flex;gap:3px;">\${colorDots}</div>
+      <button class="btn-icon" title="删除" onclick="deleteGroup(\${i})" style="color:var(--danger);">✕</button>
+    </div>\`;
+  }).join('');
+}
+
+function addGroupFromModal() {
+  const input = document.getElementById('newGroupName');
+  const name = input.value.trim();
+  if (!name) return;
+  if (groups.find(g => g.name === name)) { toast('分组已存在'); return; }
+  groups.push({ name, color: COLORS[groups.length % COLORS.length] });
+  input.value = '';
+  saveData();
+  renderGroupManageList();
+  renderGroupTabs();
+}
+
+function renameGroup(idx, newName) {
+  newName = newName.trim();
+  if (!newName) return;
+  const oldName = groups[idx].name;
+  groups[idx].name = newName;
+  // 更新卡片关联
+  items.forEach(i => { if (i.group === oldName) i.group = newName; });
+  saveData();
+  renderAll();
+  renderGroupManageList();
+}
+
+function setGroupColor(idx, color) {
+  groups[idx].color = color;
+  saveData();
+  renderGroupManageList();
+  renderGroupTabs();
+}
+
+function deleteGroup(idx) {
+  const name = groups[idx].name;
+  const count = items.filter(i => i.group === name).length;
+  if (count > 0 && !confirm(\`分组「\${name}」下有 \${count} 条信息，删除后信息将变为未分组。继续？\`)) return;
+  items.forEach(i => { if (i.group === name) i.group = ''; });
+  groups.splice(idx, 1);
+  if (activeGroup === name) activeGroup = '__all__';
+  saveData();
+  renderAll();
+  renderGroupManageList();
+}
+
+// ── 导出导入 ──────────────────────────
+function exportData() {
+  const data = JSON.stringify({ items, groups }, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = \`infobox-backup-\${new Date().toISOString().slice(0,10)}.json\`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('已导出 ✓');
+}
+
+function importData() {
+  document.getElementById('importFile').click();
+}
+
+function doImport(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (Array.isArray(data)) {
+        items = data;
+        groups = [];
+      } else {
+        items = data.items || [];
+        groups = data.groups || [];
+      }
+      saveData();
+      renderAll();
+      toast('导入成功 ✓');
+    } catch {
+      toast('JSON 格式错误', 'error');
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+// ── 深色模式 ──────────────────────────
+function toggleDark() {
+  document.body.classList.toggle('dark');
+  localStorage.setItem('dark', document.body.classList.contains('dark') ? '1' : '0');
+}
+
+// ── 帮助 ──────────────────────────────
+function toggleHelp() {
+  const el = document.getElementById('helpSection');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+// ── 下拉菜单 ──────────────────────────
+function toggleMenu(btn) {
+  const menu = btn.nextElementSibling;
+  menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  // 点击外部关闭
+  const close = (e) => {
+    if (!btn.parentElement.contains(e.target)) {
+      menu.style.display = 'none';
+      document.removeEventListener('click', close);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+// ── 工具函数 ──────────────────────────
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function toast(msg, type) {
+  const old = document.querySelector('.toast');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  if (type === 'error') el.style.background = '#ef4444';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2500);
+}
 </script>
 </body>
 </html>`;
-}
